@@ -17,6 +17,7 @@ python main_cluster.py -sample_size 200 -filename "data_use_cases/animals" -val_
 
 Go to [this folder](https://drive.google.com/drive/u/1/folders/1z02puhXXChU2A3bWjqrZm-SmDbX3m3aE) to download relevant files, including LLM output labels. SPeaking of which, I used Llama 3 via Ollama since that's a free one, but you'd need to download Ollama and pull the model.
 
+Despite calling `predict_animal_products`, the original LTS prompt in `labeling.py` actually relates to shark products, which confuses which command line use cases to input. 
 
 
 
