@@ -7,7 +7,7 @@ from transformers import Trainer, TrainingArguments, BertTokenizer
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 from datasets import Dataset, DatasetDict
 from transformers import Trainer, PreTrainedTokenizerBase, TrainingArguments, DataCollatorWithPadding, BertForSequenceClassification, PreTrainedModel
-
+from transformers import TrainerCallback
 
 class BertFineTuner:
     def __init__(self, model_name: Optional[str], training_data: Optional[pd.DataFrame], test_data: Optional[pd.DataFrame],
@@ -49,8 +49,7 @@ class BertFineTuner:
         return self.base_model
 
     def tokenize_function(self, element):
-        # return self.tokenizer(element['title'], padding="max_length", truncation=True, max_length=512)
-        return self.tokenizer(element['title'], padding="max_length", truncation=True, max_length=64)
+        return self.tokenizer(element['title'], padding="max_length", truncation=True, max_length=512)
     
     def create_dataset(self, train, test):
         dataset_train = Dataset.from_pandas(train[["title", "label"]])
@@ -81,7 +80,6 @@ class BertFineTuner:
         return {'accuracy': accuracy, 'precision': precision, 'recall': recall, 'f1': f1}
 
     def train_data(self, df, still_unbalanced):
-        # early_stopping_callback = EarlyStoppingCallback(patience=5, log_dir="./log")
         early_stopping_callback = EarlyStoppingCallback(patience=5, log_dir="./log")
         tokenized_data, data_collator = self.create_dataset(df, self.test_data)
 
@@ -92,8 +90,7 @@ class BertFineTuner:
             metric_for_best_model="eval_accuracy",
             per_device_train_batch_size=32,
             per_device_eval_batch_size=32,
-            # num_train_epochs=20,
-            num_train_epochs=10,
+            num_train_epochs=20,
             learning_rate=self.learning_rate,
             weight_decay=self.weight_decay,
             save_total_limit=2,
@@ -116,7 +113,7 @@ class BertFineTuner:
             )
             trainer.train()
             results = trainer.evaluate()
-            print(results)
+            print(f'Unbalanced results: {results}')
             self.trainer = trainer
             return results, self.trainer
         else:
@@ -131,7 +128,7 @@ class BertFineTuner:
             )
             trainer.train()
             results = trainer.evaluate()
-            print(results)
+            print(f'Balanced results: {results}')
             self.trainer = trainer
             return results, self.trainer
 
@@ -210,9 +207,6 @@ class MyTrainer(Trainer):
         loss = loss_fct(logits.view(-1, self.model.config.num_labels), labels.view(-1))
         return (loss, outputs) if return_outputs else loss
 
-
-
-from transformers import TrainerCallback, Trainer
 
 class EarlyStoppingCallback(TrainerCallback):
     def __init__(self, patience=5, log_dir=None):

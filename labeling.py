@@ -14,13 +14,20 @@ class Labeling:
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.tokenizer = None
         self.model = None
+        self.task_instructions = {
+            'sharks': "You are a labeling tool. You must only respond with 'relevant animal' or \
+                    'not a relevant animal'. Never ask questions or explain yourself.",
+            'emotions': "You are a labeling tool. You must only response with one of 'anger', 'fear', \
+                    'joy', 'love', 'sadness', or 'surprise'. Never ask questions or explain yourself.",
+        }
+        self.acceptable_labels = {
+            'sharks': ['not a relevant animal', 'relevant animal'],
+            'emotions': ['anger', 'fear', 'joy', 'love', 'sadness', 'surprise'],
+        }
+        self.label_attempts = 0
+        self.failures = 0
 
-    def generate_prompt(self, title):
-        if self.label_model == "huggingface": return self.generate_prompt(title)
-        elif self.label_model=="gpt": return self.generate_prompt(title)
-        else: return None
-
-    def generate_prompt(self, title):
+    def gp_sharks(self, title):
         return f"""
             You are labeling tool to create labels for a classification task.
             I will provide text data from an advertisement of a product. The product should be classified in two labels:
@@ -65,6 +72,15 @@ class Labeling:
             Label:
             """
 
+    def gp_emotions(self, title):
+        # TODO
+        pass
+
+    def generate_prompt(self, title, task):
+        if task == 'sharks': return self.gp_sharks(title)
+        elif task == 'emotions': return self.gp_emotions(title)
+        else: raise Exception('Unknown task')
+
     def set_model(self):
         if self.label_model == "huggingface":
             # checkpoint = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
@@ -74,49 +90,38 @@ class Labeling:
         elif self.label_model == "gpt": self.model = OpenAI(api_key="YOUR_OPENAI_API_KEY")
         else: raise ValueError("No such model")
 
-    def predict_animal_product(self, row):
-        if self.label_model == "huggingface": return self.get_huggingface_label(row)
-        elif self.label_model == "gpt": return self.get_gpt_label(row)
+    def predict_outcome(self, row, task):
+        if self.label_model == "huggingface": return self.get_huggingface_label(row, task)
+        elif self.label_model == "gpt": return self.get_gpt_label(row, task)
         else: raise ValueError("No model selected")
 
-    def generate_inference_data(self, data, column):
+    def generate_inference_data(self, data, column, task):
         examples = []
         for _, data_point in data.iterrows():
-            examples.append({
-                "id": data_point["id"],
-                "title": data_point["title"],
-                "training_text": data_point["clean_title"],
-                "text": self.generate_prompt(data_point[column]),
-            })
+            examples.append({"id": data_point["id"], "title": data_point["title"],
+                    "text": self.generate_prompt(data_point[column], task),})
         data = pd.DataFrame(examples)
         return data
 
-    def get_gpt_label(self, row):
+    def get_gpt_label(self, row, task):
         id_, prompt = row["id"], row["text"]
-        response = self.model.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt},],
-            max_tokens=100,
-            temperature=0.2,
-        )
+        response = self.model.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt},],
+                max_tokens=100, temperature=0.2,)
         return response.choices[0].message.content
 
-    def get_huggingface_label(self, row):
+    def get_huggingface_label(self, row, task):
         # using Ollama Llama 3; download it and then pull it
         id_, prompt = row["id"], row["text"]
         tries = 0
         while True:
-            response = requests.post("http://localhost:11434/api/generate",
-                json={
-                    "model": "llama3.2",
-                    "prompt": prompt,
-                    "suffix": "",  
-                    "system": "You are a labeling tool. You must only respond with 'relevant animal' or \
-                            'not a relevant animal'. Never ask questions or explain yourself.",
-                    "stream": False
-                })
+            self.label_attempts += 1
+            response = requests.post("http://localhost:11434/api/generate", json={"model": "llama3.2", "prompt": prompt,
+                    "suffix": "", "system": self.task_instructions[task], "stream": False})
             result = response.json()["response"]
-            if 'not a relevant animal' in result or 'relevant animal' in result: break
+            if result in self.acceptable_labels[task]:
+                tries = 0
+                break
+            self.failures += 1
             tries += 1
             if tries > 2: print(f'{tries} tries on labeling a specific advertisement.')
         return result

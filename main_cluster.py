@@ -2,6 +2,7 @@ import argparse
 import os
 import nltk
 import json
+import time
 import pandas as pd
 import numpy as np
 
@@ -19,36 +20,35 @@ nltk.download('punkt')
 def main():
     """ arguments handling """    
     parser = argparse.ArgumentParser(prog="Sampling fine-tuning", description='Perform Sampling and fine tune')
-    parser.add_argument('-sampling', type=str, required=False, help="Name of sampling method")
-    parser.add_argument('-sample_size', type=int, required=False, help="sample size")
-    parser.add_argument('-filter_label', type=bool, required=False, help="use model clf results to filter data")
-    parser.add_argument('-balance', type=bool, required=False, help="balance positive and neg sample")
-    parser.add_argument('-model_finetune', type=str, required=False, help="model base for fine tune")
-    parser.add_argument('-labeling', type=str, required=False, help="Model to be used for labeling or file if label already on file")
-    parser.add_argument('-baseline', type=float, required=False, help="The initial baseline metric")
-    parser.add_argument('-filename', type=str, required=False, help="The initial file to be used")
-    parser.add_argument('-model', type=str, required=False, help="The type of model to be finetune")
-    parser.add_argument('-metric', type=str, required=False, help="The type of metric to be used for baseline")
-    parser.add_argument('-val_path', type=str, required=False, help="path to validation")
-    parser.add_argument('-cluster_size', type=str, required=False, help="path to validation")
-    parser.add_argument('-loop_size', type=str, required=False, help="number of iterations in training loop")
+    parser.add_argument('-task', type=str, required=True, help="Name of task")
+    parser.add_argument('-training_data_path', type=str, required=True, help="The initial file to be used")
+    parser.add_argument('-validation_data_path', type=str, required=True, help="path to validation")
+    parser.add_argument('-sample_size', type=int, required=True, help="sample size")
+    parser.add_argument('-sampling', type=str, required=True, help="Name of sampling method")
+    parser.add_argument('-filter_label', type=bool, required=True, help="use model clf results to filter data")
+    parser.add_argument('-balance', type=bool, required=True, help="balance positive and neg sample")
+    parser.add_argument('-labeling_llm', type=str, required=True, help="Model to be used for labeling or file if label already on file")
+    parser.add_argument('-model_path', type=str, required=True, help="model base for fine tune")
+    parser.add_argument('-metric', type=str, required=True, help="The type of metric to be used for baseline")
+    parser.add_argument('-metric_baseline', type=float, required=True, help="The initial baseline metric")
+    parser.add_argument('-cluster_size', type=str, required=True, help="path to validation")
+    parser.add_argument('-loop_size', type=str, required=True, help="number of iterations in training loop")
     
     args = parser.parse_args()
-
-    sampling = args.sampling
+    task = args.task
+    training_data_path = args.training_data_path
+    validation_data_path = args.validation_data_path
     sample_size = args.sample_size
-    filter_label = args.filter_label
+    sampling = args.sampling
     balance = args.balance
-    model_finetune = args.model_finetune
-    labeling = args.labeling
-    baseline = args.baseline
-    filename = args.filename
-    model = args.model
+    filter_label = args.filter_label
+    labeling_llm = args.labeling_llm
+    model_path = args.model_path
     metric = args.metric
-    validation_path = args.val_path
+    metric_baseline = args.metric_baseline
     cluster_size = args.cluster_size
     loop_size = args.loop_size
-
+    
     """ folders handling """
     os.makedirs("models", exist_ok=True)
     os.makedirs("data", exist_ok=True)
@@ -57,34 +57,33 @@ def main():
 
     """ dealing with validation and training data csvs """
     preprocessor = TextPreprocessor()
-    validation = pd.read_csv(validation_path)
+    validation = pd.read_csv(validation_data_path)
     validation["training_text"] = validation["title"]
     data = None
     try:
         # if cluster is already labeled, do this
-        data = pd.read_csv(filename + "_lda.csv")
+        data = pd.read_csv(training_data_path.split('.')[0] + "_lda.csv")
         n_cluster = data['label_cluster'].value_counts().count()
         print(f"Using data saved on disk: {n_cluster} clusters")
     except Exception:
         # if cluster is not labled yet, do this
         print("Creating LDA")
-        data = pd.read_csv(filename + ".csv")
+        data = pd.read_csv(training_data_path)
         data = preprocessor.preprocess_df(data)
         lda_topic_model = LDATopicModel(num_topics=cluster_size)
-        topics = lda_topic_model.fit_transform(data['clean_title'].to_list())
+        topics = lda_topic_model.fit_transform(data['title'].to_list())
         data["label_cluster"] = topics
         n_cluster = data['label_cluster'].value_counts().count()
-        data.to_csv(filename + "_lda.csv", index=False)
+        data.to_csv(training_data_path.split('.')[0] + "_lda.csv", index=False)
         print(f"LDA created: {n_cluster} clusters")
 
-    """ select LTS-text model (the only model available atp """
-    if model == "text": trainer = BertFineTuner(model_finetune, None, validation)
-    else: raise ValueError("Currently only text model is supported")
+    """ select LTS-text model (the only model available atp) """
+    trainer = BertFineTuner(model_path, None, validation)
     if trainer.device == 'cuda:0': print('Using cuda!')
     else: print('Using CPU')
     
     """ get labelling object with LLM prompting functionalities """
-    labeler = Labeling(label_model=labeling)
+    labeler = Labeling(label_model=labeling_llm)
     labeler.set_model()
 
     """ get sampler """
@@ -95,10 +94,11 @@ def main():
 
     """ train loop_size times """
     df = None
+    start = time.time()
     if not loop_size: loop_size = 10
     for i in range(int(loop_size)):
         """ sample data; DELETE labeled.csv if model use change """
-        labeled_data_path = f"{filename}_data_labeled.csv"
+        labeled_data_path = f"{training_data_path.split('.')[0]}_labeled.csv"
         labeled_data = None
         chosen_bandit = sampler.choose_bandit()
 
@@ -117,6 +117,7 @@ def main():
             seen_data_list = np.loadtxt('selected_ids.txt', delimiter=None, dtype=str, skiprows=0)
             labeled_data = labeled_data[~labeled_data['id'].isin(seen_data_list)]
 
+        """ LLM labeling """
         if len(labeled_data) >= sample_size:
             print(f'Sampled data found for bandit {chosen_bandit}')
             df = labeled_data.sample(n=sample_size)
@@ -126,8 +127,8 @@ def main():
         else:
             print(f'No data found for bandit {chosen_bandit}. Rechoosing bandit...')
             sample_data, chosen_bandit = sampler.get_sample_data(data, sample_size, filter_label, trainer)
-            df = labeler.generate_inference_data(sample_data, 'clean_title')            
-            df["answer"] = df.apply(lambda x: labeler.predict_animal_product(x), axis=1)
+            df = labeler.generate_inference_data(sample_data, 'title', task)
+            df["answer"] = df.apply(lambda x: labeler.predict_outcome(x, task), axis=1)
             df["answer"] = df["answer"].str.strip()
             df["label"] = np.where(df["answer"] == 'relevant animal', 1, 0)
             df['chosen_bandit'] = chosen_bandit
@@ -157,8 +158,8 @@ def main():
         """ checks """
         model_name = trainer.get_base_model()
         model_results = trainer.get_last_model_acc()
-        if model_results: baseline = model_results[model_name]
-        print(f"Model {metric} metric is currently {baseline}")
+        if model_results: metric_baseline = model_results[model_name]
+        print(f"Model {metric} metric is currently {metric_baseline}")
 
         """ recheck balance status """
         still_unbalanced = len(df[df["label"] == 0]) / len(df[df["label"] == 1]) >= 2
@@ -166,19 +167,20 @@ def main():
 
         """ training """
         results, huggingface_trainer = trainer.train_data(df, still_unbalanced)
-        reward_difference = results[f"eval_{metric}"] - baseline
+        reward_difference = results[f"eval_{metric}"] - metric_baseline
         print(f"Model changed by {reward_difference}. Save model? {reward_difference > 0}")
         if reward_difference > 0:
-            model_name = f"models/fine_tunned_{i}_bandit_{chosen_bandit}"
+            model_name = f"models/finetuned_{i}_bandit_{chosen_bandit}"
             trainer.update_model(model_name, results[f"eval_{metric}"], save_model=True)
-            if os.path.exists(f'{filename}_training_data.csv'):
-                train_data = pd.read_csv(f'{filename}_training_data.csv')
+            additional_training_data_path = f"{training_data_path.split('.')[0]}_training_data.csv"
+            if os.path.exists(additional_training_data_path):
+                train_data = pd.read_csv(additional_training_data_path)
                 df = pd.concat([train_data, df])
-            df.to_csv(f'{filename}_training_data.csv', index=False)
+            df.to_csv(additional_training_data_path, index=False)
             if os.path.exists('positive_data.csv'): os.remove('positive_data.csv')
             if filter_label: trainer.set_clf(True)
         else:
-            trainer.update_model(model_name, baseline, save_model=False)
+            trainer.update_model(model_name, metric_baseline, save_model=False)
             if os.path.exists('positive_data.csv'):
                 positive = pd.read_csv("positive_data.csv")
                 df = df[df["label"] == 1]
@@ -187,19 +189,20 @@ def main():
             df[df["label"] == 1].to_csv("positive_data.csv", index=False)
 
         """ save results into record """
-        if os.path.exists(f'{filename}_model_results.json'):
-            with open(f'{filename}_model_results.json', 'r') as file:
+        model_results_path = f"{training_data_path.split('.')[0]}_model_results.json"
+        if os.path.exists(model_results_path):
+            with open(model_results_path, 'r') as file:
                 existing_results = json.load(file)
         else: existing_results = {}
         if existing_results.get(str(chosen_bandit)): existing_results[str(chosen_bandit)].append(results)
         else: existing_results[str(chosen_bandit)] = [results]
-        with open(f'{filename}_model_results.json', 'w') as file:
+        with open(model_results_path, 'w') as file:
             json.dump(existing_results, file, indent=4)
 
         """ update sampler """
         if sampling == "thompson": sampler.update(chosen_bandit, reward_difference)
 
-    print('Finished')
+    print(f'Finished in {(time.time() - start) / 60} minutes')
 
 if __name__ == "__main__":
     main()
