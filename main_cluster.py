@@ -124,10 +124,14 @@ def main():
         if model_results: metric_baseline = model_results[model_name]
         print(f"Model {metric} metric is currently {metric_baseline}")
 
-        """ recheck balance status """        
-        still_unbalanced = len(df[df["label"] == 0]) / len(df[df["label"] == 1]) >= 2
-        if still_unbalanced: print(f"Unbalanced? {still_unbalanced}")
-
+        """ recheck balance status """
+        try:
+            still_unbalanced = len(df[df["label"] == 0]) / len(df[df["label"] == 1]) >= 2
+            if still_unbalanced: print(f"Unbalanced? {still_unbalanced}")
+        except:
+            print('Assuming this failed because of multi-classification...')
+            still_unbalanced = True
+        
         """ training """
         results, x_trainer = trainer.train_data(df, still_unbalanced)
         reward_difference = results[f"eval_{metric}"] - metric_baseline
