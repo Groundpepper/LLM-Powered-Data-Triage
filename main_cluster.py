@@ -25,8 +25,8 @@ def main():
     parser.add_argument('-validation_data_path', type=str, required=True, help="path to validation")
     parser.add_argument('-sample_size', type=int, required=True, help="sample size")
     parser.add_argument('-sampling', type=str, required=True, help="Name of sampling method")
-    parser.add_argument('-filter_label', type=bool, required=True, help="use model clf results to filter data")
     parser.add_argument('-balance', type=bool, required=True, help="balance positive and neg sample")
+    parser.add_argument('-filter_label', type=bool, required=True, help="use model clf results to filter data")
     parser.add_argument('-labeling_llm', type=str, required=True, help="Model to be used for labeling or file if label already on file")
     parser.add_argument('-model_path', type=str, required=True, help="model base for fine tune")
     parser.add_argument('-metric', type=str, required=True, help="The type of metric to be used for baseline")
@@ -40,8 +40,8 @@ def main():
     validation_data_path = args.validation_data_path
     sample_size = args.sample_size
     sampling = args.sampling
-    balance = args.balance
-    filter_label = args.filter_label
+    balance = True if args.balance == 'True' else False
+    filter_label = True if args.filter_label == 'True' else False
     labeling_llm = args.labeling_llm
     model_path = args.model_path
     metric = args.metric
@@ -83,8 +83,7 @@ def main():
     else: print('Using CPU')
     
     """ get labelling object with LLM prompting functionalities """
-    labeler = Labeling(label_model=labeling_llm)
-    labeler.set_model()
+    labeler = Labeling(label_model=labeling_llm, task=task)
 
     """ get sampler """
     sampler = None
@@ -97,50 +96,14 @@ def main():
     start = time.time()
     if not loop_size: loop_size = 10
     for i in range(int(loop_size)):
-        """ sample data; DELETE labeled.csv if model use change """
-        labeled_data_path = f"{training_data_path.split('.')[0]}_labeled.csv"
-        labeled_data = None
-        chosen_bandit = sampler.choose_bandit()
-
-        print(f'Trying to retrieve already sampled data for bandit {chosen_bandit}...')
-        if not os.path.exists(labeled_data_path):
-            pd.DataFrame(columns=['id', 'title', 'training_text', 'text', 'answer', 'label', 'chosen_bandit']).to_csv(labeled_data_path, index=False)
-            
-        labeled_data = pd.read_csv(labeled_data_path)
-        labeled_data = labeled_data.drop_duplicates(subset=['id'], keep='last')
-        labeled_data = labeled_data[labeled_data['answer'].isin(['not a relevant animal', 'relevant animal'])]
-        labeled_data.to_csv(labeled_data_path, index=False)
-        labeled_data = labeled_data[labeled_data['chosen_bandit'] == chosen_bandit]
-
-        # if previously sampled in the same run
-        if os.path.exists('selected_ids.txt'):
-            seen_data_list = np.loadtxt('selected_ids.txt', delimiter=None, dtype=str, skiprows=0)
-            labeled_data = labeled_data[~labeled_data['id'].isin(seen_data_list)]
-
-        """ LLM labeling """
-        if len(labeled_data) >= sample_size:
-            print(f'Sampled data found for bandit {chosen_bandit}')
-            df = labeled_data.sample(n=sample_size)
-            df = df[['id', 'title', 'training_text', 'text', 'answer', 'label']]
-            with open('selected_ids.txt', 'w') as f:
-                f.write('\n'.join(map(str, df.id)))
-        else:
-            print(f'No data found for bandit {chosen_bandit}. Rechoosing bandit...')
-            sample_data, chosen_bandit = sampler.get_sample_data(data, sample_size, filter_label, trainer)
-            df = labeler.generate_inference_data(sample_data, 'title', task)
-            df["answer"] = df.apply(lambda x: labeler.predict_outcome(x, task), axis=1)
-            df["answer"] = df["answer"].str.strip()
-            df["label"] = np.where(df["answer"] == 'relevant animal', 1, 0)
-            df['chosen_bandit'] = chosen_bandit
-            print(f'inference df: {df["label"].value_counts()}')
-
-            if os.path.exists(labeled_data_path):
-                labeled_data = pd.read_csv(labeled_data_path)
-                labeled_data = pd.concat([labeled_data, df])
-                labeled_data.to_csv(labeled_data_path, index=False)
-            else:
-                df.to_csv(labeled_data_path, index=False)
-            df = df[['id', 'title', 'training_text', 'text', 'answer', 'label']]
+        """ sample data; DELETE labeled.csv if model use or task change """
+        sample_data, chosen_bandit = sampler.get_sample_data(data, sample_size, filter_label, trainer)
+        df = labeler.generate_inference_data(sample_data, 'clean_title')
+        df["llm_response"] = labeler.get_llm_responses_parallel(df['full_prompt'])
+        df['label'] = df['llm_response'].map(labeler.task_pairings[task])
+        print(f'inference df: {df["label"].value_counts()}')
+        print(f'Sampler history: {labeler.failures} / {labeler.label_attempts} = \
+                {labeler.failures / labeler.label_attempts * 100}% of labels attempts failed')
         
         """ balance sample if needed """
         if balance:
@@ -161,12 +124,12 @@ def main():
         if model_results: metric_baseline = model_results[model_name]
         print(f"Model {metric} metric is currently {metric_baseline}")
 
-        """ recheck balance status """
+        """ recheck balance status """        
         still_unbalanced = len(df[df["label"] == 0]) / len(df[df["label"] == 1]) >= 2
         if still_unbalanced: print(f"Unbalanced? {still_unbalanced}")
 
         """ training """
-        results, huggingface_trainer = trainer.train_data(df, still_unbalanced)
+        results, x_trainer = trainer.train_data(df, still_unbalanced)
         reward_difference = results[f"eval_{metric}"] - metric_baseline
         print(f"Model changed by {reward_difference}. Save model? {reward_difference > 0}")
         if reward_difference > 0:

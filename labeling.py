@@ -2,15 +2,17 @@ import torch
 import os
 import pandas as pd
 import requests
+import random
 
 from pprint import pprint
 from openai import OpenAI
 from transformers import AutoModelForCausalLM, AutoTokenizer
-
+from dask.distributed import LocalCluster, Client
 
 class Labeling:
-    def __init__(self, label_model= "huggingface"):
+    def __init__(self, label_model, task):
         self.label_model = label_model
+        self.task = task
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
         self.tokenizer = None
         self.model = None
@@ -20,17 +22,17 @@ class Labeling:
             'emotions': "You are a labeling tool. You must only response with one of 'anger', 'fear', \
                     'joy', 'love', 'sadness', or 'surprise'. Never ask questions or explain yourself.",
         }
-        self.acceptable_labels = {
-            'sharks': ['not a relevant animal', 'relevant animal'],
-            'emotions': ['anger', 'fear', 'joy', 'love', 'sadness', 'surprise'],
+        self.task_pairings = {
+            'sharks': {'not a relevant animal': 0, 'relevant animal': 1},
+            'emotions': {'anger': 0, 'fear': 1, 'joy': 2, 'love': 3, 'sadness': 4, 'surprise': 5}
         }
         self.label_attempts = 0
         self.failures = 0
 
-    def gp_sharks(self, title):
+    def get_prompt_sharks(self, title):
         return f"""
-            You are labeling tool to create labels for a classification task.
-            I will provide text data from an advertisement of a product. The product should be classified in two labels:
+            You are a labeling tool to create labels for a classification task.
+            I will provide text data from an advertisement of a product. The product should be classified as one of two labels:
             
             Label 1: relevant animal - if the product is from any of those 3 animals: Shark, Ray or Chimaeras.
             It should be from a real animal. Not an image or plastic for example.
@@ -72,56 +74,60 @@ class Labeling:
             Label:
             """
 
-    def gp_emotions(self, title):
-        # TODO
+    def get_prompt_emotions(self, title):
+        return f"""
+            You are a labeling tool to create labels for a classification task.
+            I will provide text in the form of a sentence or two. The text should be classified as one of six labels:
+                    'anger', 'fear', 'joy', 'love', 'sadness', 'surprise'.
+
+            Text: {title}
+            Label: 
+        """
         pass
 
-    def generate_prompt(self, title, task):
-        if task == 'sharks': return self.gp_sharks(title)
-        elif task == 'emotions': return self.gp_emotions(title)
+    def generate_prompt(self, title):
+        if self.task == 'sharks': return self.get_prompt_sharks(title)
+        elif self.task == 'emotions': return self.get_prompt_emotions(title)
         else: raise Exception('Unknown task')
 
-    def set_model(self):
-        if self.label_model == "huggingface":
-            # checkpoint = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-            # self.model = AutoModelForCausalLM.from_pretrained(checkpoint).to(self.device)
-            # self.tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-            pass
-        elif self.label_model == "gpt": self.model = OpenAI(api_key="YOUR_OPENAI_API_KEY")
-        else: raise ValueError("No such model")
-
-    def predict_outcome(self, row, task):
-        if self.label_model == "huggingface": return self.get_huggingface_label(row, task)
-        elif self.label_model == "gpt": return self.get_gpt_label(row, task)
-        else: raise ValueError("No model selected")
-
-    def generate_inference_data(self, data, column, task):
+    def generate_inference_data(self, data, column):
         examples = []
         for _, data_point in data.iterrows():
-            examples.append({"id": data_point["id"], "title": data_point["title"],
-                    "text": self.generate_prompt(data_point[column], task),})
-        data = pd.DataFrame(examples)
-        return data
+            examples.append({"id": data_point["id"], "title": data_point["title"], "prompt_input": data_point["clean_title"],
+                    "full_prompt": self.generate_prompt(data_point[column]),})
+        return pd.DataFrame(examples)
 
-    def get_gpt_label(self, row, task):
-        id_, prompt = row["id"], row["text"]
-        response = self.model.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt},],
-                max_tokens=100, temperature=0.2,)
-        return response.choices[0].message.content
-
-    def get_huggingface_label(self, row, task):
-        # using Ollama Llama 3; download it and then pull it
-        id_, prompt = row["id"], row["text"]
+    def get_llm_response(self, prompt):
         tries = 0
         while True:
-            self.label_attempts += 1
-            response = requests.post("http://localhost:11434/api/generate", json={"model": "llama3.2", "prompt": prompt,
-                    "suffix": "", "system": self.task_instructions[task], "stream": False})
-            result = response.json()["response"]
-            if result in self.acceptable_labels[task]:
-                tries = 0
-                break
-            self.failures += 1
             tries += 1
-            if tries > 2: print(f'{tries} tries on labeling a specific advertisement.')
-        return result
+            response = requests.post("http://localhost:11434/api/generate", json={"model": "llama3.2", "prompt": prompt,
+                    "suffix": "", "system": self.task_instructions[self.task], "stream": False})
+            result = response.json()["response"]
+            if result in self.task_pairings[self.task]:
+                break
+            if tries > 20:
+                print(f'Over 20 tries to retrieve a valid response for {row.title[:60]}. Picking a label on random')
+                return random.choice(list(self.task_pairings[self.task].keys()))
+            if tries > 2:
+                print(f'{tries} tries on labeling a specific entity: {row.title[:60]}...')
+                print(f'Model responded with: {result[:60]}...')
+        return result, tries
+    
+    def get_llm_responses_parallel(self, series):
+        print('Creating dask cluster...')
+        cluster = LocalCluster()
+        client = Client(cluster)
+        print(client.dashboard_link)
+
+        futures = client.map(self.get_llm_response, series.values)
+        results = client.gather(futures)
+        responses = [str.strip(response) for (response, tries) in results]
+        
+        for _, tries in results:
+            self.label_attempts += 1
+            self.failures += (tries - 1)
+            
+        client.close()
+        cluster.close()
+        return responses

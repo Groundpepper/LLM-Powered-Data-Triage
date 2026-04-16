@@ -14,9 +14,6 @@ class ThompsonSampler:
         self.alpha = alpha  # Prior parameter for Beta distribution (successes)
         self.beta = beta   # Prior parameter for Beta distribution (failures)
         self.decay = decay
-        
-        if os.path.exists('selected_ids.txt'):
-            os.remove('selected_ids.txt')
         self.selected_ids = set()
     
         if os.path.exists('wins.txt'):
@@ -77,6 +74,4 @@ class ThompsonSampler:
                     data = self.select_data(bandit_df, chosen_bandit, sample_size)
 
         self.selected_ids.update(data['id'])
-        with open('selected_ids.txt', 'w') as f:
-            f.write('\n'.join(map(str, self.selected_ids)))        
         return data, chosen_bandit
