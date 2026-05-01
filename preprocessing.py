@@ -22,21 +22,16 @@ class TextPreprocessor:
             text = text.replace("\n", " ")
             # Remove \xa0 characters
             text = text.replace("\xa0", " ")
-
             text = text.replace("eBay", "")
-
             text = self.remove_weird_characters(text)
-
             text = self.remove_extra_whitespaces(text)
         except Exception:
             print(text)
         return text
 
-
     def remove_weird_characters(self, text):
-        text = self.weird_chars_regex.sub('', text)
-        return text
+        return self.weird_chars_regex.sub('', text)
 
     def remove_extra_whitespaces(self, text):
-        text = re.sub(r'\s+', ' ', text)
-        return text
+        return re.sub(r'\s+', ' ', text)
+        

@@ -1,13 +1,12 @@
 import torch
-import os
 import pandas as pd
 import requests
 import random
+import time
 
-from pprint import pprint
-from openai import OpenAI
-from transformers import AutoModelForCausalLM, AutoTokenizer
-from dask.distributed import LocalCluster, Client
+from dask import delayed, compute
+from dask.diagnostics import ProgressBar
+
 
 class Labeling:
     def __init__(self, label_model, task):
@@ -19,14 +18,14 @@ class Labeling:
         self.task_instructions = {
             'sharks': "You are a labeling tool. You must only respond with 'relevant animal' or \
                     'not a relevant animal'. Never ask questions or explain yourself.",
-            'emotions': "You are a labeling tool. You must only response with one of 'anger', 'fear', \
-                    'joy', 'love', 'sadness', or 'surprise'. Never ask questions or explain yourself.",
+            'emotions': "Answer with one of 'anger', 'fear', 'joy', 'love', 'sadness', or 'surprise'.\
+                    Never ask questions or explain yourself.",
         }
         self.task_pairings = {
             'sharks': {'not a relevant animal': 0, 'relevant animal': 1},
             'emotions': {'anger': 0, 'fear': 1, 'joy': 2, 'love': 3, 'sadness': 4, 'surprise': 5}
         }
-        self.label_attempts = 0
+        self.attempts = 0
         self.failures = 0
 
     def get_prompt_sharks(self, title):
@@ -72,18 +71,42 @@ class Labeling:
 
             6. Advertisement: {title}
             Label:
-            """
+        """
 
     def get_prompt_emotions(self, title):
         return f"""
             You are a labeling tool to create labels for a classification task.
-            I will provide text in the form of a sentence or two. The text should be classified as one of six labels:
-                    'anger', 'fear', 'joy', 'love', 'sadness', 'surprise'.
+            I will provide text data in the form of a sentence. The text should be classified as one of six labels:
+            
+            Label 1: anger
+            Label 2: fear
+            Label 3: joy
+            Label 4: love
+            Label 5: sadness
+            Label 6: surprise
 
-            Text: {title}
+            Example:
+            1. Text: i feel like taking a whack at someone s eye and spitting on it a cranky old lady i try to cheer myself up
+            Label: anger
+
+            2. Text: i for one am feeling a bit anxious at how long we are staying but i know we need to do this
+            Label: fear
+
+            3. Text: i feel incredibly lucky just to be able to talk to her
+            Label: joy
+
+            4. Text: i miss our talks our cuddling our kissing and the feelings that you can only share with your beloved
+            Label: love
+
+            5. Text: im feeling quite sad and sorry for myself but ill snap out of it soon
+            Label: sadness
+
+            6. Text: i cant seem to get passed feeling stunned
+            Label: surprise
+            
+            7. Text: {title}
             Label: 
         """
-        pass
 
     def generate_prompt(self, title):
         if self.task == 'sharks': return self.get_prompt_sharks(title)
@@ -93,41 +116,39 @@ class Labeling:
     def generate_inference_data(self, data, column):
         examples = []
         for _, data_point in data.iterrows():
-            examples.append({"id": data_point["id"], "title": data_point["title"], "prompt_input": data_point["clean_title"],
-                    "full_prompt": self.generate_prompt(data_point[column]),})
+            row = data_point.to_dict()
+            row["prompt_input"] = data_point["clean_title"]
+            row["full_prompt"] = self.generate_prompt(data_point[column])
+            examples.append(row)
         return pd.DataFrame(examples)
 
-    def get_llm_response(self, prompt):
+    def get_llm_response(self, series, verbose=False):
+        title, prompt = series['title'], series['full_prompt']
         tries = 0
         while True:
             tries += 1
-            response = requests.post("http://localhost:11434/api/generate", json={"model": "llama3.2", "prompt": prompt,
-                    "suffix": "", "system": self.task_instructions[self.task], "stream": False})
-            result = response.json()["response"]
+            response = requests.post("http://localhost:11434/api/generate", json={"model": self.label_model, "prompt": prompt,
+                    "system": self.task_instructions[self.task], "stream": False})
+            result = response.json()["response"].strip()
             if result in self.task_pairings[self.task]:
                 break
-            if tries > 20:
-                print(f'Over 20 tries to retrieve a valid response for {row.title[:60]}. Picking a label on random')
-                return random.choice(list(self.task_pairings[self.task].keys()))
-            if tries > 2:
-                print(f'{tries} tries on labeling a specific entity: {row.title[:60]}...')
-                print(f'Model responded with: {result[:60]}...')
+            if verbose:
+                if tries > 10:
+                    print(f'Over 10 tries to retrieve a valid response for {title[:60]}. Picking a label on random')
+                    return random.choice(list(self.task_pairings[self.task].keys())), tries
+                if tries > 5:
+                    print(f'{tries} tries on labeling a specific entity: {title[:80]}...')
+                    print(f'Model responded with: {result[:80]}...')
         return result, tries
-    
-    def get_llm_responses_parallel(self, series):
-        print('Creating dask cluster...')
-        cluster = LocalCluster()
-        client = Client(cluster)
-        print(client.dashboard_link)
 
-        futures = client.map(self.get_llm_response, series.values)
-        results = client.gather(futures)
-        responses = [str.strip(response) for (response, tries) in results]
-        
-        for _, tries in results:
-            self.label_attempts += 1
-            self.failures += (tries - 1)
-            
-        client.close()
-        cluster.close()
-        return responses
+    def get_llm_responses_parallel(self, df, verbose=False):
+        start = time.time()
+        tasks = [delayed(self.get_llm_response)(df.iloc[i], verbose) for i in range(len(df))]
+        with ProgressBar():
+            results = compute(*tasks)
+            responses = [str.strip(response) for (response, tries) in results]
+            for _, tries in results:
+                self.attempts += 1
+                self.failures += (tries - 1)
+            print(f'Finished parallel LLM querying in {(time.time() - start) / 60}')
+            return responses

@@ -1,8 +1,7 @@
 import torch
-import pandas as pd
-from transformers import BertTokenizer, BertModel
-import numpy as np
 import umap
+import numpy as np
+from transformers import BertTokenizer, BertModel
 
 
 class BertTextEmbedder:
@@ -60,5 +59,3 @@ class BertTextEmbedder:
         umap_model = umap.UMAP(n_components=n_components, metric='euclidean')
         umap_projection = umap_model.fit_transform(bert_embeddings)
         return umap_projection
-
-
