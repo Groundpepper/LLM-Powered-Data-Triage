@@ -7,15 +7,31 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Go to [this folder](https://drive.google.com/drive/u/1/folders/1z02puhXXChU2A3bWjqrZm-SmDbX3m3aE) to download relevant files, including LLM output labels. Speaking of which, I used Llama 3 via Ollama since that's a free one, but you'd need to download Ollama and pull the model.
-
-
-Despite calling `predict_animal_products`, the original LTS prompt in `labeling.py` actually relates to shark products, which confuses which command line use cases to input. 
+Ollama is used for LLM pseudo-labeling. Download it.
 
 ```
-python main_cluster.py -task "sharks" -training_data_path "data/training_sharks.csv" -validation_data_path "data/validation_sharks.csv" -sample_size 200 -sampling "thompson" -balance True -filter_label True -labeling_llm "ollama" -model_path "bert-base-uncased" -metric "f1" -metric_baseline 0.5 -cluster_size 10 -loop_size 10
+irm https://ollama.com/install.ps1 | iex
 ```
 
+Once done, pull relevant models. The best (fastest and most accurate for our purpose) is `glm4:9b`. Also in our report was `llama3:8b` and `granite4.1:8b`.
+```
+ollama pull glm4:9b
+```
 
+Once done, run the model:
+```
+python main_cluster.py
+    -task "emotions"
+    -training_data_path "data/training_emotions.csv"
+    -validation_data_path "data/validation_emotions.csv"
+    -sample_size 400
+    -balance True
+    -labeling_llm "glm4:9b"
+    -model_path "bert-base-uncased"
+    -metric "f1"
+    -cluster_type KMeans
+    -cluster_size 5
+    -loop_size 10
+```
 
-
+Do NOT contact For questions or feedback.
