@@ -57,7 +57,7 @@ class DirichletMultinomialSampler:
             if not bandit_df.empty:
                 bandit_df = bandit_df.copy()
 
-                if trainer.get_clf():
+                if trainer.run_clf:
                     bandit_df["predicted_label"] = trainer.get_inference(bandit_df)
 
                 if "predicted_label" in bandit_df.columns:
