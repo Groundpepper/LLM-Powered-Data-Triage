@@ -29,7 +29,10 @@ class DirichletMultinomialSampler:
         delta = new_f1_per_class - old_f1_per_class
         for c in range(self.n_classes):
             if delta[c] > 0: self.alpha[chosen_bandit][c] += delta[c]
-            else: self.alpha[chosen_bandit][c] = max(self.alpha[chosen_bandit][c] + delta[c], self.prior)
+            else: 
+                self.alpha[chosen_bandit][c] += delta[c]
+                self.alpha[chosen_bandit][c] = max(self.alpha[chosen_bandit][c], 1e-3)
+                # self.alpha[chosen_bandit][c] = max(self.alpha[chosen_bandit][c] + delta[c], self.prior)
     
         visited = self.visit_counts > 0
         self.alpha[visited] = np.maximum(self.prior + (self.alpha[visited] - self.prior) * self.decay, self.prior)
@@ -56,11 +59,10 @@ class DirichletMultinomialSampler:
 
             if not bandit_df.empty:
                 bandit_df = bandit_df.copy()
-
-                if trainer.run_clf:
-                    bandit_df["predicted_label"] = trainer.get_inference(bandit_df)
-
+                if trainer.run_clf: bandit_df["predicted_label"] = trainer.get_inference(bandit_df)
                 if "predicted_label" in bandit_df.columns:
+                    print('predicted_labels\n', bandit_df.predicted_label.value_counts().sort_index())
+                    
                     classes = bandit_df["predicted_label"].unique()
                     n_per_class = max(1, sample_size // len(classes))
                     samples = []
